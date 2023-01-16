@@ -1,80 +1,58 @@
-import com.intellij.lang.java.JavaLanguage
+import com.intellij.ide.UiActivity
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
-import com.intellij.openapi.actionSystem.LangDataKeys
-import com.intellij.openapi.command.WriteCommandAction
-import com.intellij.openapi.ui.Messages
-import com.intellij.psi.search.searches.ReferencesSearch
-import org.jetbrains.kotlin.idea.KotlinLanguage
-import org.jetbrains.kotlin.lexer.KtTokens
-import org.jetbrains.kotlin.psi.KtClass
-import org.jetbrains.kotlin.psi.KtNamedFunction
-import org.jetbrains.kotlin.psi.KtPsiFactory
-import org.jetbrains.kotlin.psi.KtTreeVisitor
-import org.jetbrains.kotlin.psi.psiUtil.containingClass
-import org.jetbrains.kotlin.psi.psiUtil.getValueParameterList
-import org.jetbrains.kotlin.psi.psiUtil.isAbstract
+import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.VfsUtilCore
+import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VirtualFileVisitor
+import com.intellij.psi.PsiJavaFile
+import com.intellij.psi.PsiManager
+import org.jetbrains.kotlin.psi.*
+import org.jetbrains.kotlin.psi.psiUtil.*
 
 class ConvertFromAutoValueToDataClassAction : AnAction("Convert from Abstract Class to Data Class") {
 
     override fun actionPerformed(event: AnActionEvent) {
-        val project = event.project
-        val file = event.getRequiredData(LangDataKeys.PSI_FILE)
-        val classMap = mutableMapOf<KtClass, MutableList<KtNamedFunction>>()
+        val conversionHelper = DataClassConversionHelper()
+        conversionHelper.startConversion(event)
 
-        //Go through all abstract classes and their corresponding abstract methods in the file
-        file.accept(object : KtTreeVisitor<Any>() {
+//    override fun update(e: AnActionEvent) {
+//        val virtualFiles = e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY) ?: return
+//        val project = e.project ?: return
+//        e.presentation.isEnabled = isAnyJavaFileSelected(project, virtualFiles)
+//    }
+//
+    }
 
-            override fun visitClass(klass: KtClass, data: Any?): Void? {
-                if (!klass.isData() && klass.isAbstract()) {
-                    classMap[klass] = mutableListOf()
+    private fun isAnyJavaFileSelected(project: Project, files: Array<VirtualFile>): Boolean {
+        val manager = PsiManager.getInstance(project)
+        if (files.any { manager.findFile(it) is PsiJavaFile && it.isWritable }) return true
+        return files.any { it.isDirectory && isAnyJavaFileSelected(project, it.children) }
+    }
+    private fun selectedJavaFiles(e: AnActionEvent): Sequence<PsiJavaFile> {
+        val virtualFiles = e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY) ?: return sequenceOf()
+        val project = e.project ?: return sequenceOf()
+        return allJavaFiles(virtualFiles, project)
+    }
+
+    private fun allJavaFiles(filesOrDirs: Array<VirtualFile>, project: Project): Sequence<PsiJavaFile> {
+        val manager = PsiManager.getInstance(project)
+        return allFiles(filesOrDirs)
+            .asSequence()
+            .mapNotNull { manager.findFile(it) as? PsiJavaFile }
+    }
+
+    private fun allFiles(filesOrDirs: Array<VirtualFile>): Collection<VirtualFile> {
+        val result = ArrayList<VirtualFile>()
+        for (file in filesOrDirs) {
+            VfsUtilCore.visitChildrenRecursively(file, object : VirtualFileVisitor<Unit>() {
+                override fun visitFile(file: VirtualFile): Boolean {
+                    result.add(file)
+                    return true
                 }
-                return super.visitClass(klass, data)
-            }
-
-            override fun visitNamedFunction(function: KtNamedFunction, data: Any?): Void? {
-                val klass = function.containingClass()
-                if (klass != null
-                        && classMap.contains(function.containingClass())
-                        && function.hasModifier(KtTokens.ABSTRACT_KEYWORD)) {
-                    classMap.getValue(klass).add(function)
-                }
-                return super.visitNamedFunction(function, data)
-            }
-        })
-
-        val write = WriteCommandAction.writeCommandAction(project)
-        write.run<Throwable> {
-            //Convert each class to data class
-            classMap.flatMap { (klass, functions) ->
-                klass.addModifier(KtTokens.DATA_KEYWORD)
-                klass.removeModifier(KtTokens.ABSTRACT_KEYWORD)
-
-                return@flatMap functions.map { Pair(klass, it) }
-            }
-            //Convert each abstract function to a data class field
-            .forEach { (klass, function) ->
-                val oldName = function.name!!
-                val newName = if (oldName.substring(0, 3) == "get") {
-                    oldName
-                } else {
-                    "get${oldName.capitalize()}"
-                }
-
-                val factory = KtPsiFactory(klass)
-                val param = factory.createParameter("val $oldName: ${function.typeReference?.text}")
-                klass.getValueParameterList()?.addParameter(param)
-
-                ReferencesSearch.search(function).findAll().forEach {
-                    when (it.element.language) {
-                        JavaLanguage.INSTANCE -> it.handleElementRename(newName)
-                        KotlinLanguage.INSTANCE -> it.element.parent.replace(factory.createExpression(param.name!!))
-                    }
-                }
-                function.delete()
-            }
+            })
         }
-
-        Messages.showMessageDialog(project, "Conversion to Data Class completed successfully", "Done!", Messages.getInformationIcon())
+        return result
     }
 }
